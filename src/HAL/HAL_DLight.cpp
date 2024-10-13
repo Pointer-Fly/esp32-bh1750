@@ -1,4 +1,4 @@
-#include "M5_DLight.h"
+#include "HAL_DLight.h"
 
 M5_DLight::M5_DLight(uint8_t addr) {
     _addr = addr;
