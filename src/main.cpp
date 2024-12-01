@@ -1,52 +1,301 @@
-/**************************************************************************
-  This is a library for several Adafruit displays based on ST77* drivers.
-
-  Works with the Adafruit ESP32-S2 TFT Feather
-    ----> http://www.adafruit.com/products/5300
-
-  Check out the links above for our tutorials and wiring diagrams.
-
-  Adafruit invests time and resources providing this open source code,
-  please support Adafruit and open-source hardware by purchasing
-  products from Adafruit!
-
-  Written by Limor Fried/Ladyada for Adafruit Industries.
-  MIT license, all text above must be included in any redistribution
- **************************************************************************/
-
+#include <Arduino.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <SPI.h>
+#include <ESP32Servo.h>
+#include "HAL_DLight.h"
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
-#include <SPI.h>
-#include "HAL/HAL_DLight.h"
 
-// Use dedicated hardware SPI pins
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
-M5_DLight sensor;
-uint16_t lux;
 
 // function prototypes
-void mediabuttons();
-void testlines(uint16_t color);
-void testdrawtext(char *text, uint16_t color);
-void testfastlines(uint16_t color1, uint16_t color2);
-void testdrawrects(uint16_t color);
-void testfillrects(uint16_t color1, uint16_t color2);
-void testfillcircles(uint8_t radius, uint16_t color);
-void testdrawcircles(uint8_t radius, uint16_t color);
-void testtriangles();
-void testroundrects();
-void tftPrintTest();
-void testfillcircles(uint8_t radius, uint16_t color);
-void testdrawcircles(uint8_t radius, uint16_t color);
+void Disp_Init();
 
-float p = 3.1415926;
+// Use dedicated hardware SPI pins
+M5_DLight sensor;
 
-void setup(void)
+#define MAX_WIDTH 2500
+#define MIN_WIDTH 500
+#define SERVO_PIN 13
+
+#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_SERVO_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a9"
+#define CHARACTERISTIC_LIGHT_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a0"
+
+// 定义 servo 对象
+Servo my_servo;
+BLECharacteristic *pCharacteristicLight;
+
+enum MENU_ENUM
 {
-  Serial.begin(9600);
-  Serial.print(F("Hello! Feather TFT Test"));
+  MENU_SP,
+  MENU_AP,
+  MENU_ISO,
+  MENU_MODE,
+};
+MENU_ENUM gCurMenu = MENU_ISO;
 
-  // turn on backlite
+enum MODE_ENUM
+{
+  MODE_AV,
+  MODE_TV,
+};
+MODE_ENUM gModel = MODE_AV;
+
+static int gIsoList[] = {12, 25, 50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 600, 800, 1600, 3200, 6400, 12800, 25600, 51200};
+static int gIsoListSize = sizeof(gIsoList) / sizeof(int);
+int gCurIsoIndex = 5;
+int gIso = gIsoList[gCurIsoIndex];
+
+static float gSpList[] = {1.0 / 1, 1.0 / 2, 1.0 / 3, 1.0 / 4, 1.0 / 5, 1.0 / 6, 1.0 / 8, 1.0 / 10, 1.0 / 13, 1.0 / 15, 1.0 / 20, 1.0 / 25, 1.0 / 30, 1.0 / 40, 1.0 / 50, 1.0 / 60, 1.0 / 80, 1.0 / 100, 1.0 / 125, 1.0 / 160, 1.0 / 200, 1.0 / 250, 1.0 / 320, 1.0 / 400, 1.0 / 500, 1.0 / 640, 1.0 / 800, 1.0 / 1000, 1.0 / 1250, 1.0 / 1600, 1.0 / 2000, 1.0 / 2500, 1.0 / 3200, 1.0 / 4000, 1.0 / 5000, 1.0 / 6400, 1.0 / 8000, 1.0 / 12000};
+static int gSpListSize = sizeof(gSpList) / sizeof(float);
+int gSpIndex = 8;
+float gSp = gSpList[gSpIndex];
+
+static float gApertureList[] = {1, 1.2, 1.4, 1.8, 2, 2.4, 2.8, 3, 3.2, 3.5, 4, 4.5, 5, 5.6, 6.3, 7.1, 8, 9, 10, 11, 13, 14, 16, 18, 20, 22, 26, 28, 32, 36, 40, 45, 52, 56, 64};
+static int gApertureListSize = sizeof(gApertureList) / sizeof(float);
+int gCurApertureIndex = 5;
+float gAperture = gApertureList[gCurApertureIndex];
+int gLux = 0;
+
+void servoInit()
+{
+  // 分配硬件定时器
+  ESP32PWM::allocateTimer(0);
+  // 设置频率
+  my_servo.setPeriodHertz(50);
+  // 关联 servo 对象与 GPIO 引脚，设置脉宽范围
+  my_servo.attach(SERVO_PIN, MIN_WIDTH, MAX_WIDTH);
+}
+void servoDown()
+{
+  for (int i = 180; i >= 0; i--)
+  {
+    my_servo.write(i);
+    delay(15);
+  }
+}
+
+void servoUp()
+{
+  for (int i = 0; i <= 180; i++)
+  {
+    my_servo.write(i);
+    delay(15);
+  }
+}
+
+class BLECallbacks : public BLECharacteristicCallbacks
+{
+  void onWrite(BLECharacteristic *pCharacteristic)
+  {
+    std::string value = pCharacteristic->getValue();
+    // 区分不同的特征值
+    if (pCharacteristic->getUUID().equals(BLEUUID(CHARACTERISTIC_SERVO_UUID)))
+    {
+      if (value.length() > 0)
+      {
+        Serial.println("*********");
+        if (value[0] == '0')
+        {
+          Serial.println("Servo down");
+          servoDown();
+        }
+        else if (value[0] == '1')
+        {
+          Serial.println("Servo up");
+          servoUp();
+        }
+        Serial.println();
+        Serial.println("*********");
+      }
+    }
+  }
+};
+
+void BLE_Init()
+{
+
+  Serial.println("Starting BLE work!");
+
+  BLEDevice::init("ESP32");
+  BLEServer *pServer = BLEDevice::createServer();
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  BLECharacteristic *pCharacteristicServo = pService->createCharacteristic(
+      CHARACTERISTIC_SERVO_UUID,
+          BLECharacteristic::PROPERTY_WRITE);
+
+  pCharacteristicLight = pService->createCharacteristic(
+      CHARACTERISTIC_LIGHT_UUID,
+      BLECharacteristic::PROPERTY_READ);
+
+  pCharacteristicServo->setValue("0");
+  pCharacteristicServo->setCallbacks(new BLECallbacks());
+
+  pCharacteristicLight->setValue("0");
+  pCharacteristicLight->setCallbacks(new BLECallbacks());
+
+  pService->start();
+  // BLEAdvertising *pAdvertising = pServer->getAdvertising();  // this still is working for backward compatibility
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06); // functions that help with iPhone connections issue
+  pAdvertising->setMinPreferred(0x12);
+  BLEDevice::startAdvertising();
+  Serial.println("Characteristic defined! Now you can read it in your phone!");
+}
+
+void switchMenu()
+{
+  if (gModel == MODE_AV)
+  {
+    gCurMenu = (gCurMenu == MENU_ISO) ? MENU_AP : (gCurMenu == MENU_AP) ? MENU_MODE
+                                                                        : MENU_ISO;
+  }
+  else
+  {
+    gCurMenu = (gCurMenu == MENU_ISO) ? MENU_SP : (gCurMenu == MENU_SP) ? MENU_MODE
+                                                                        : MENU_ISO;
+  }
+}
+
+void adjustValue(int direction)
+{
+  switch (gCurMenu)
+  {
+  case MENU_SP:
+    gSpIndex = (gSpIndex + direction + gSpListSize) % gSpListSize;
+    gSp = gSpList[gSpIndex];
+    break;
+  case MENU_AP:
+    gCurApertureIndex = (gCurApertureIndex + direction + gApertureListSize) % gApertureListSize;
+    gAperture = gApertureList[gCurApertureIndex];
+    break;
+  case MENU_ISO:
+    gCurIsoIndex = (gCurIsoIndex + direction + gIsoListSize) % gIsoListSize;
+    gIso = gIsoList[gCurIsoIndex];
+    break;
+  case MENU_MODE:
+    gModel = (gModel == MODE_AV) ? MODE_TV : MODE_AV;
+    break;
+  }
+}
+
+void keyScanTask(void *pvParameters)
+{
+  while (1)
+  {
+    if (digitalRead(17) == 0 || digitalRead(18) == 0)
+    {
+      delay(50);
+      if (digitalRead(17) == 0 && digitalRead(18) == 0)
+      {
+        switchMenu();
+        while (digitalRead(17) == 0)
+        {
+          delay(1);
+        }
+      }
+      else if (digitalRead(17) == 0)
+      {
+        adjustValue(1);
+        while (digitalRead(17) == 0)
+        {
+          delay(1);
+        }
+      }
+      else if (digitalRead(18) == 0)
+      {
+        adjustValue(-1);
+        while (digitalRead(18) == 0)
+        {
+          delay(1);
+        }
+      }
+    }
+  }
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  // Initialize the keypad
+  pinMode(18, INPUT);
+  pinMode(17, INPUT);
+  // sensor.begin();
+  // delay(500);
+  // sensor.setMode(CONTINUOUSLY_H_RESOLUTION_MODE);
+
+  // servoInit();
+  // Disp_Init();
+  BLE_Init();
+  // xTaskCreatePinnedToCore(keyScanTask, "keyScanTask", 4096, NULL, 1, NULL, 1);
+}
+
+void displayLx()
+{
+  gLux = sensor.getLUX();
+  pCharacteristicLight->setValue(String(gLux).c_str());
+  tft.setTextSize(2);
+  tft.setCursor(5, 115);
+  tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  tft.printf("%d Lx        \n", gLux);
+}
+
+void displayMode()
+{
+  int thisColor = gCurMenu == MENU_MODE ? ST77XX_GREEN : ST77XX_WHITE;
+  tft.fillRect(214, 114, 26, 18, thisColor);
+  tft.setTextColor(ST77XX_BLACK, thisColor);
+  tft.setTextSize(2);
+  tft.setCursor(216, 116);
+  tft.printf("%s\n", gModel == MODE_AV ? "AV" : "TV");
+}
+
+void displaySP()
+{
+  int thisColor = gCurMenu == MENU_SP ? ST77XX_GREEN : ST77XX_WHITE;
+  tft.setTextColor(thisColor, ST77XX_BLACK);
+  tft.drawRect(0, 0, 240, 40, thisColor);
+  tft.setTextSize(4);
+  tft.setCursor(5, 5);
+  tft.printf("1/%.0f\n", 1.0 / gSp);
+}
+
+void displayAperture()
+{
+  int thisColor = gCurMenu == MENU_AP ? ST77XX_GREEN : ST77XX_WHITE;
+  tft.setTextColor(thisColor, ST77XX_BLACK);
+  tft.drawRect(155, 55, 85, 50, thisColor);
+  tft.setCursor(160, 50);
+  tft.setTextSize(2);
+  tft.printf("F\n");
+  tft.setCursor(160, 70);
+  tft.setTextSize(4);
+  if (gAperture < 10)
+    tft.printf("%.1f\n", gAperture);
+  else
+    tft.printf("%.0f\n", gAperture);
+}
+
+void displayISO()
+{
+  int thisColor = gCurMenu == MENU_ISO ? ST77XX_GREEN : ST77XX_WHITE;
+  tft.setTextColor(thisColor, ST77XX_BLACK);
+  tft.drawRect(0, 55, 150, 50, thisColor);
+  tft.setCursor(5, 50);
+  tft.setTextSize(2);
+  tft.printf("ISO\n");
+  tft.setCursor(5, 70);
+  tft.setTextSize(4);
+  tft.printf("%d\n", gIso);
+}
+
+void Disp_Init()
+{
   pinMode(TFT_BACKLITE, OUTPUT);
   digitalWrite(TFT_BACKLITE, HIGH);
 
@@ -59,313 +308,41 @@ void setup(void)
   tft.init(135, 240); // Init ST7789 240x135
   tft.setRotation(3);
   tft.fillScreen(ST77XX_BLACK);
-
-  Serial.println(F("Initialized"));
-
-  uint16_t time = millis();
-  tft.fillScreen(ST77XX_BLACK);
-  time = millis() - time;
-
-  Serial.println(time, DEC);
-  sensor.begin();
-  delay(500);
-  // CONTINUOUSLY_H_RESOLUTION_MODE
-  // CONTINUOUSLY_H_RESOLUTION_MODE2
-  // CONTINUOUSLY_L_RESOLUTION_MODE
-  // ONE_TIME_H_RESOLUTION_MODE
-  // ONE_TIME_H_RESOLUTION_MODE2
-  // ONE_TIME_L_RESOLUTION_MODE
-  sensor.setMode(CONTINUOUSLY_H_RESOLUTION_MODE);
-
-  // large block of text
-  // tft.fillScreen(ST77XX_BLACK);
-  // testdrawtext(
-  //     "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Curabitur "
-  //     "adipiscing ante sed nibh tincidunt feugiat. Maecenas enim massa, "
-  //     "fringilla sed malesuada et, malesuada sit amet turpis. Sed porttitor "
-  //     "neque ut ante pretium vitae malesuada nunc bibendum. Nullam aliquet "
-  //     "ultrices massa eu hendrerit. Ut sed nisi lorem. In vestibulum purus a "
-  //     "tortor imperdiet posuere. ",
-  //     ST77XX_WHITE);
-  // delay(1000);
-
-  // // tft print function!
-  // tftPrintTest();
-  // delay(4000);
-
-  // // a single pixel
-  // tft.drawPixel(tft.width() / 2, tft.height() / 2, ST77XX_GREEN);
-  // delay(500);
-
-  // // line draw test
-  // testlines(ST77XX_YELLOW);
-  // delay(500);
-
-  // // optimized lines
-  // testfastlines(ST77XX_RED, ST77XX_BLUE);
-  // delay(500);
-
-  // testdrawrects(ST77XX_GREEN);
-  // delay(500);
-
-  // testfillrects(ST77XX_YELLOW, ST77XX_MAGENTA);
-  // delay(500);
-
-  // tft.fillScreen(ST77XX_BLACK);
-  // testfillcircles(10, ST77XX_BLUE);
-  // testdrawcircles(10, ST77XX_WHITE);
-  // delay(500);
-
-  // testroundrects();
-  // delay(500);
-
-  // testtriangles();
-  // delay(500);
-
-  // mediabuttons();
-  // delay(500);
-
-  // Serial.println("done");
-  // delay(1000);
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(2);
 }
 
-void loop(void)
+// 计算快门速度
+void calculateShutterSpeed()
 {
-  float lux = 0;
-  lux = sensor.getLUX();
-
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setCursor(0, 0);
-  tft.print("Lux: ");
-  tft.println(lux);
-  delay(1000);
-  // tft.invertDisplay(true);
-  // delay(500);
-  // tft.invertDisplay(false);
-  // delay(500);
+  float K = 12.5;
+  gSp = (gAperture * gAperture * 100) / (K * gIso * gLux);
 }
 
-void testlines(uint16_t color)
+// 计算光圈
+void calculateAperture()
 {
-  tft.fillScreen(ST77XX_BLACK);
-  for (int16_t x = 0; x < tft.width(); x += 6)
-  {
-    tft.drawLine(0, 0, x, tft.height() - 1, color);
-    delay(0);
-  }
-  for (int16_t y = 0; y < tft.height(); y += 6)
-  {
-    tft.drawLine(0, 0, tft.width() - 1, y, color);
-    delay(0);
-  }
+  float K = 12.5;
+  gAperture = sqrt((gIso * gLux * K * gSp) / 100);
+}
 
-  tft.fillScreen(ST77XX_BLACK);
-  for (int16_t x = 0; x < tft.width(); x += 6)
+void calcFunc()
+{
+  if (gModel == MODE_AV)
   {
-    tft.drawLine(tft.width() - 1, 0, x, tft.height() - 1, color);
-    delay(0);
+    calculateShutterSpeed();
   }
-  for (int16_t y = 0; y < tft.height(); y += 6)
+  else
   {
-    tft.drawLine(tft.width() - 1, 0, 0, y, color);
-    delay(0);
-  }
-
-  tft.fillScreen(ST77XX_BLACK);
-  for (int16_t x = 0; x < tft.width(); x += 6)
-  {
-    tft.drawLine(0, tft.height() - 1, x, 0, color);
-    delay(0);
-  }
-  for (int16_t y = 0; y < tft.height(); y += 6)
-  {
-    tft.drawLine(0, tft.height() - 1, tft.width() - 1, y, color);
-    delay(0);
-  }
-
-  tft.fillScreen(ST77XX_BLACK);
-  for (int16_t x = 0; x < tft.width(); x += 6)
-  {
-    tft.drawLine(tft.width() - 1, tft.height() - 1, x, 0, color);
-    delay(0);
-  }
-  for (int16_t y = 0; y < tft.height(); y += 6)
-  {
-    tft.drawLine(tft.width() - 1, tft.height() - 1, 0, y, color);
-    delay(0);
+    calculateAperture();
   }
 }
 
-void testdrawtext(char *text, uint16_t color)
+void loop()
 {
-  tft.setCursor(0, 0);
-  tft.setTextColor(color);
-  tft.setTextWrap(true);
-  tft.print(text);
-}
-
-void testfastlines(uint16_t color1, uint16_t color2)
-{
-  tft.fillScreen(ST77XX_BLACK);
-  for (int16_t y = 0; y < tft.height(); y += 5)
-  {
-    tft.drawFastHLine(0, y, tft.width(), color1);
-  }
-  for (int16_t x = 0; x < tft.width(); x += 5)
-  {
-    tft.drawFastVLine(x, 0, tft.height(), color2);
-  }
-}
-
-void testdrawrects(uint16_t color)
-{
-  tft.fillScreen(ST77XX_BLACK);
-  for (int16_t x = 0; x < tft.width(); x += 6)
-  {
-    tft.drawRect(tft.width() / 2 - x / 2, tft.height() / 2 - x / 2, x, x,
-                 color);
-  }
-}
-
-void testfillrects(uint16_t color1, uint16_t color2)
-{
-  tft.fillScreen(ST77XX_BLACK);
-  for (int16_t x = tft.width() - 1; x > 6; x -= 6)
-  {
-    tft.fillRect(tft.width() / 2 - x / 2, tft.height() / 2 - x / 2, x, x,
-                 color1);
-    tft.drawRect(tft.width() / 2 - x / 2, tft.height() / 2 - x / 2, x, x,
-                 color2);
-  }
-}
-
-void testfillcircles(uint8_t radius, uint16_t color)
-{
-  for (int16_t x = radius; x < tft.width(); x += radius * 2)
-  {
-    for (int16_t y = radius; y < tft.height(); y += radius * 2)
-    {
-      tft.fillCircle(x, y, radius, color);
-    }
-  }
-}
-
-void testdrawcircles(uint8_t radius, uint16_t color)
-{
-  for (int16_t x = 0; x < tft.width() + radius; x += radius * 2)
-  {
-    for (int16_t y = 0; y < tft.height() + radius; y += radius * 2)
-    {
-      tft.drawCircle(x, y, radius, color);
-    }
-  }
-}
-
-void testtriangles()
-{
-  tft.fillScreen(ST77XX_BLACK);
-  uint16_t color = 0xF800;
-  int t;
-  int w = tft.width() / 2;
-  int x = tft.height() - 1;
-  int y = 0;
-  int z = tft.width();
-  for (t = 0; t <= 15; t++)
-  {
-    tft.drawTriangle(w, y, y, x, z, x, color);
-    x -= 4;
-    y += 4;
-    z -= 4;
-    color += 100;
-  }
-}
-
-void testroundrects()
-{
-  tft.fillScreen(ST77XX_BLACK);
-  uint16_t color = 100;
-  int i;
-  int t;
-  for (t = 0; t <= 4; t += 1)
-  {
-    int x = 0;
-    int y = 0;
-    int w = tft.width() - 2;
-    int h = tft.height() - 2;
-    for (i = 0; i <= 16; i += 1)
-    {
-      tft.drawRoundRect(x, y, w, h, 5, color);
-      x += 2;
-      y += 3;
-      w -= 4;
-      h -= 6;
-      color += 1100;
-    }
-    color += 100;
-  }
-}
-
-void tftPrintTest()
-{
-  tft.setTextWrap(false);
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setCursor(0, 30);
-  tft.setTextColor(ST77XX_RED);
-  tft.setTextSize(1);
-  tft.println("Hello World!");
-  tft.setTextColor(ST77XX_YELLOW);
-  tft.setTextSize(2);
-  tft.println("Hello World!");
-  tft.setTextColor(ST77XX_GREEN);
-  tft.setTextSize(3);
-  tft.println("Hello World!");
-  tft.setTextColor(ST77XX_BLUE);
-  tft.setTextSize(4);
-  tft.print(1234.567);
-  delay(1500);
-  tft.setCursor(0, 0);
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(0);
-  tft.println("Hello World!");
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_GREEN);
-  tft.print(p, 6);
-  tft.println(" Want pi?");
-  tft.println(" ");
-  tft.print(8675309, HEX); // print 8,675,309 out in HEX!
-  tft.println(" Print HEX!");
-  tft.println(" ");
-  tft.setTextColor(ST77XX_WHITE);
-  tft.println("Sketch has been");
-  tft.println("running for: ");
-  tft.setTextColor(ST77XX_MAGENTA);
-  tft.print(millis() / 1000);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.print(" seconds.");
-}
-
-void mediabuttons()
-{
-  // play
-  tft.fillScreen(ST77XX_BLACK);
-  tft.fillRoundRect(25, 5, 78, 60, 8, ST77XX_WHITE);
-  tft.fillTriangle(42, 12, 42, 60, 90, 40, ST77XX_RED);
-  delay(500);
-  // pause
-  tft.fillRoundRect(25, 70, 78, 60, 8, ST77XX_WHITE);
-  tft.fillRoundRect(39, 78, 20, 45, 5, ST77XX_GREEN);
-  tft.fillRoundRect(69, 78, 20, 45, 5, ST77XX_GREEN);
-  delay(500);
-  // play color
-  tft.fillTriangle(42, 12, 42, 60, 90, 40, ST77XX_BLUE);
-  delay(50);
-  // pause color
-  tft.fillRoundRect(39, 78, 20, 45, 5, ST77XX_RED);
-  tft.fillRoundRect(69, 78, 20, 45, 5, ST77XX_RED);
-  // play color
-  tft.fillTriangle(42, 12, 42, 60, 90, 40, ST77XX_GREEN);
+  // displayLx();
+  // displaySP();
+  // displayAperture();
+  // displayISO();
+  // displayMode();
+  // tft.setCursor(0, 0);
+  // delay(50);
 }
